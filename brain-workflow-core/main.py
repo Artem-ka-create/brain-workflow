@@ -25,7 +25,7 @@ def main():
     # 1) план
     plan = create_plan(user_goal)
     print("\n[RAW PLAN JSON]")
-    print(plan.model_json(indent=2))
+    print(plan.model_dump_json(indent=2))
 
     # 2) евалюатор
     eval_result = evaluate_plan(user_goal, plan)
@@ -34,7 +34,7 @@ def main():
     if not eval_result.is_good and eval_result.improved_plan:
         plan = eval_result.improved_plan
         print("\n[PLAN WAS IMPROVED BY EVALUATOR]")
-        print(plan.model_json(indent=2))
+        print(plan.model_dump_json(indent=2))
 
     # 3) реєструємо тулзи
     tools = ToolRegistry()

@@ -37,9 +37,7 @@ Answer strictly using the EvalResult schema.
 def evaluate_plan(goal: str, plan: Plan) -> EvalResult:
     chain = evaluator_prompt | llm.with_structured_output(EvalResult)
 
-    return chain.invoke(
-    {
-        "goal": goal,
-        "plan_json": plan.json(indent=2),
-    }
-)
+    return chain.invoke({
+    "goal": goal,
+    "plan_json": plan.model_dump_json(indent=2),
+})
