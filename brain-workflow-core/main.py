@@ -1,13 +1,18 @@
 # main.py - Головний файл що зв'язує все разом
+import os
+from turtle import pd
+from typing import Dict, Any
+from langchain_openai import ChatOpenAI
 
 from agents.planner import create_plan
 from agents.evaluator import evaluate_plan
 from agents.executor import Executor, ToolRegistry
 from agents.observer import simple_observer
 from dotenv import load_dotenv
+from langchain_community.utilities import GoogleSerperAPIWrapper
 
 load_dotenv()
-
+llm = ChatOpenAI(model="gpt-5-mini", temperature=0)
 
 # ==================== TOOLS SETUP ====================
 
@@ -16,18 +21,17 @@ def setup_tools() -> ToolRegistry:
     tools = ToolRegistry()
 
     # Tool 1: Web Search (mock for now, replace with real implementation)
-    def web_search(params):
+    serp_api = GoogleSerperAPIWrapper()  # auth via .env automatically
+
+    def web_search(params: Dict[str, Any]):
+        print("PARAMS-> ",params)
         query = params.get("query", "")
-        print(f"    [web_search] Searching for: {query}")
-        # TODO: Replace with real web search API
-        return {
-            "query": query,
-            "results": [
-                f"Mock result 1 for '{query}'",
-                f"Mock result 2 for '{query}'",
-                f"Mock result 3 for '{query}'"
-            ]
-        }
+        if not query:
+            return {"error": "missing 'query' in parameters"}
+
+        print(f"[web_search] Searching: {query}")
+        result = serp_api.run(query)  # Returns summarized results
+        return {"query": query, "results": result}
 
     # Tool 2: Code Executor (mock)
     def code_executor(params):
@@ -53,15 +57,73 @@ def setup_tools() -> ToolRegistry:
             return {"status": "error", "error": str(e)}
 
     # Tool 4: Data Analysis (mock)
-    def data_analysis(params):
-        data = params.get("data", [])
+    def data_analysis(params: Dict[str, Any]):
+        print("PARAMS-> ",params)
+        # PARAMS->  {'context_data': ['recommended_methods', 'learning_preference']}
+        """
+        Supported params:
+        - data: list of dicts OR CSV string OR JSON string
+        - analysis_type: summary | correlation | outliers | llm_insights | auto
+        """
+
+        data = params.get("data", None)
         analysis_type = params.get("analysis_type", "summary")
-        print(f"    [data_analysis] Analyzing data with type: {analysis_type}")
-        # TODO: Replace with real data analysis
-        return {
-            "analysis_type": analysis_type,
-            "insights": f"Mock insights for {len(data)} data points"
-        }
+
+        print(f"[data_analysis] Data analysis type: {analysis_type}")
+        print(f"[data_analysis] Data analysis data: {data}")
+
+        if data is None:
+            return {"error": "Missing 'data' parameter"}
+
+        # ======================
+        # 1) PARSE DATA INTO PANDAS
+        # ======================
+        try:
+            if isinstance(data, str):
+                if data.strip().startswith("["):
+                    df = pd.read_json(data)
+                else:
+                    from io import StringIO
+                    df = pd.read_csv(StringIO(data))
+            else:
+                df = pd.DataFrame(data)  # list of dicts or similar
+        except Exception as e:
+            return {"error": f"Could not convert to DataFrame: {e}"}
+
+        response = {"analysis_type": analysis_type, "rows": len(df), "cols": list(df.columns)}
+
+        # ======================
+        # 2) ANALYSIS LOGIC
+        # ======================
+        if analysis_type == "summary":
+            response["summary"] = df.describe(include="all").to_dict()
+
+        elif analysis_type == "correlation":
+            response["correlation"] = df.corr(numeric_only=True).to_dict()
+
+        elif analysis_type == "outliers":
+            numeric_df = df.select_dtypes(include=["int64", "float64"])
+            outliers = (numeric_df - numeric_df.mean()).abs() > (3 * numeric_df.std())
+            response["outliers"] = outliers.sum().to_dict()
+
+        elif analysis_type == "llm_insights":
+            prompt = f"Analyze this data and provide key insights:\n\n{df.head().to_string()}"
+            llm_output = llm.invoke(prompt)
+            response["llm_insights"] = llm_output.content
+
+        elif analysis_type == "auto":
+            # decide automatically
+            if len(df.columns) > 4:
+                response["auto_decision"] = "correlation"
+                response["correlation"] = df.corr(numeric_only=True).to_dict()
+            else:
+                response["auto_decision"] = "summary"
+                response["summary"] = df.describe(include="all").to_dict()
+
+        else:
+            response["error"] = f"Unknown analysis_type: {analysis_type}"
+
+        return response
 
     # Реєструємо tools
     tools.register("web_search", web_search)
