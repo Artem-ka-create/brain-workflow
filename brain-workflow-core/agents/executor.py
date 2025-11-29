@@ -137,13 +137,33 @@ Provide your reasoning (2-4 sentences):
         """Крок 2: Вибрати конкретну дію на основі reasoning"""
         step = memory["step"]
 
+        # Prepare context preview - show actual data, not just keys
+        context_preview = {}
+        for key, value in memory["available_context"].items():
+            value_str = str(value)
+            # Include full value if small, preview if large
+            if len(value_str) <= 500:
+                context_preview[key] = value
+            else:
+                context_preview[key] = value_str[:500] + f"... [truncated, total {len(value_str)} chars]"
+
         prompt = f"""
 Based on this reasoning:
 {thought}
 
 TASK: {step.instruction}
 AVAILABLE TOOLS: {self.tools.list_tools()}
-AVAILABLE CONTEXT: {list(memory["available_context"].keys())}
+
+AVAILABLE CONTEXT DATA:
+{json.dumps(context_preview, indent=2, default=str)}
+
+IMPORTANT: When using tools, you have access to the actual data above. 
+- For data_analysis tool: pass the actual data value, not the key name
+- For file_write tool: 
+  * filename: descriptive name based on content (e.g., "english_b2_plan.txt", not "output.txt")
+  * content: use Markdown or plain text format, NOT Python dict/JSON representation
+  * Make content human-readable and well-formatted
+- For other tools: construct params based on the available context data
 
 Decide the next action. Return ONLY valid JSON in one of these formats:
 
@@ -224,19 +244,52 @@ Provide a brief observation (1-3 sentences):
         recent_thoughts = memory["thought_log"][-2:]
         recent_actions = memory["action_log"][-2:]
 
+        # Check if required tool was specified and called
+        tool_check_msg = ""
+        if step.tool:
+            tool_called = any(
+                action.get('action', {}).get('tool') == step.tool
+                for action in recent_actions
+            )
+            if not tool_called:
+                print(f"🔍 EVALUATION: NO - Required tool '{step.tool}' was not called yet")
+                return False
+            tool_check_msg = f"✅ Required tool '{step.tool}' was called."
+
         prompt = f"""
 TASK: {step.instruction}
+STAGE: {step.stage}
+
+{tool_check_msg}
 
 RECENT REASONING:
-{json.dumps(recent_thoughts, indent=2)}
+{json.dumps(recent_thoughts, indent=2, default=str)}
 
 RECENT ACTIONS & OBSERVATIONS:
-{json.dumps(recent_actions, indent=2)}
+{json.dumps(recent_actions, indent=2, default=str)}
 
-Question: Is this task complete? Do we have sufficient information to provide a final answer?
+CRITICAL EVALUATION RULES:
+1. If task says "Create X" or "Generate X" or "Design X":
+   - You MUST have ACTUALLY created/generated content
+   - Just gathering information is NOT completion
+   - The final result must contain the actual X, not a plan to create X
+
+2. If task says "Write to file" or uses file_write tool:
+   - You MUST have successfully called file_write tool
+   - Just thinking about writing is NOT completion
+
+3. If task says "Search" or "Research":
+   - You MUST have executed search and obtained results
+   - Having a plan to search is NOT completion
+
+4. "Sufficient information" means you have COMPLETED the deliverable, not just gathered data
+
+Question: Has the ACTUAL task deliverable been COMPLETED and CREATED?
+Not "do we have info?" but "is the task DONE?"
 
 Answer with ONLY "YES" or "NO" followed by a one-sentence reason:
-Example: "YES - We have gathered all required data and can now synthesize the final result."
+Example: "YES - We have created the complete study plan with specific weekly activities."
+Example: "NO - We only gathered information but have not yet created the actual study plan."
 """
         response = self.llm.invoke(prompt).content.strip()
 
@@ -248,17 +301,39 @@ Example: "YES - We have gathered all required data and can now synthesize the fi
 
     def _synthesize_final_result(self, step: Step, memory: Dict) -> Any:
         """Синтезувати фінальний результат з усіх спостережень"""
+
+        # Determine output format based on task type
+        format_hint = ""
+        if "write" in step.instruction.lower() or "file" in step.instruction.lower():
+            format_hint = """
+IMPORTANT OUTPUT FORMAT:
+- If creating text for a file: Use clean, human-readable format (Markdown, plain text)
+- Use proper headers (# ## ###) and formatting
+- Make it presentation-ready, not code/data structure
+- DO NOT output Python dictionaries or JSON
+"""
+        elif "plan" in step.instruction.lower() or "create" in step.instruction.lower():
+            format_hint = """
+IMPORTANT OUTPUT FORMAT:
+- Use Markdown format with clear headers and structure
+- Make it easy to read and follow
+- Use bullet points, numbered lists where appropriate
+- Include all details in a well-organized way
+"""
+
         prompt = f"""
 Task: {step.instruction}
 
 All thoughts and reasoning:
-{json.dumps(memory["thought_log"], indent=2)}
+{json.dumps(memory["thought_log"], indent=2, default=str)}
 
 All actions and observations:
-{json.dumps(memory["action_log"], indent=2)}
+{json.dumps(memory["action_log"], indent=2, default=str)}
+
+{format_hint}
 
 Synthesize all of this into a clear, structured final result that answers the task.
-Be concise but complete. Format appropriately (text, list, structured data, etc.):
+Be concise but complete. Format appropriately for the task (text, list, structured data, etc.):
 """
         response = self.llm.invoke(prompt)
         return response.content.strip()
