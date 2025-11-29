@@ -274,14 +274,26 @@ class Executor:
             tools: ToolRegistry,
             ask_user: Callable[[str], str],
             observer: Callable[[Plan, int, Dict[str, Any]], bool],
+            use_memory_manager: bool = True  # ← ДОДАЙ ЦЕ
     ):
         """
         ask_user: функція що задає питання користувачу
         observer: перевіряє чи досягнута глобальна ціль
+        use_memory_manager: використовувати MemoryManager для summarization
         """
         self.tools = tools
         self.ask_user = ask_user
         self.observer = observer
+
+        # ← ДОДАЙ ЦЕ
+        # Memory management
+        if use_memory_manager:
+            from .memory import MemoryManager
+            self.memory = MemoryManager(max_context_length=3000)
+            print("  🧠 MemoryManager enabled (auto-summarization for large results)")
+        else:
+            self.memory = None
+
         self.context: Dict[str, Any] = {}
 
         # Ініціалізуємо ReAct агента
@@ -317,7 +329,15 @@ class Executor:
         print(f"\n❓ Question: {step.instruction}\n")
         answer = self.ask_user(step.instruction)
         key = step.output_key or step.id
-        self.context[key] = answer
+
+        # ← ЗМІНЕНО
+        # Store in memory if available
+        if self.memory:
+            self.memory.store(key, answer)
+            self.context[key] = answer  # також в context для observer
+        else:
+            self.context[key] = answer
+
         print(f"✅ Saved answer to context['{key}']")
 
     def _run_analysis_step(self, step: Step):
@@ -326,10 +346,14 @@ class Executor:
 
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-        # Підготуй контекст для аналізу
-        relevant_context = {k: self.context.get(k)
-                            for k in step.expected_input_keys
-                            if k in self.context}
+        # ← ЗМІНЕНО
+        # Підготуй контекст для аналізу (з memory якщо є)
+        if self.memory:
+            relevant_context = self.memory.get_relevant_context(step.expected_input_keys)
+        else:
+            relevant_context = {k: self.context.get(k)
+                                for k in step.expected_input_keys
+                                if k in self.context}
 
         prompt = f"""
 You are performing analysis as part of a larger autonomous task.
@@ -338,7 +362,7 @@ ANALYSIS INSTRUCTION:
 {step.instruction}
 
 AVAILABLE DATA:
-{json.dumps(relevant_context, indent=2)}
+{json.dumps(relevant_context, indent=2, default=str)}
 
 Perform the requested analysis and provide structured results:
 """
@@ -347,18 +371,43 @@ Perform the requested analysis and provide structured results:
         result = response.content
 
         key = step.output_key or step.id
-        self.context[key] = result
+
+        # ← ЗМІНЕНО
+        if self.memory:
+            self.memory.store(key, result)
+            self.context[key] = result  # також в context для observer
+        else:
+            self.context[key] = result
 
         print(f"✅ Analysis complete. Saved to context['{key}']")
         print(f"Result preview: {result[:200]}...")
 
     def _run_action_step(self, step: Step):
         """Виконання action через ReAct агента"""
-        # ReAct агент автономно виконує step
-        result = self.react_agent.execute_step(step, self.context)
+        # ← ЗМІНЕНО
+        # Підготуй контекст для ReAct (з memory якщо є)
+        if self.memory:
+            context_for_react = self.memory.context.copy()
+        else:
+            context_for_react = self.context.copy()
 
-        # Збережи результат у контекст
+        # ReAct агент автономно виконує step
+        result = self.react_agent.execute_step(step, context_for_react)
+
+        # Збережи результат
         key = step.output_key or step.id
-        self.context[key] = result
+
+        if self.memory:
+            self.memory.store(key, result)
+            self.context[key] = result  # також в context для observer
+        else:
+            self.context[key] = result
 
         print(f"\n✅ Action complete. Result saved to context['{key}']")
+
+        # ← ДОДАНО
+        # Show memory stats if enabled
+        if self.memory:
+            stats = self.memory.get_context_stats()
+            print(
+                f"   📊 Memory: {stats['total_keys']} keys, {stats['total_size_chars']} chars, {stats['summarized_keys']} summarized")
